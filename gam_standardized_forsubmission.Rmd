@@ -1,0 +1,755 @@
+---
+title: "GAM Code"
+author: ""
+date: "May 12, 2021"
+output: html_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Load in Packages
+
+```{r}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(RSNNS))
+suppressPackageStartupMessages(library(infotheo))
+suppressPackageStartupMessages(library(leaps))
+suppressPackageStartupMessages(library(mltools))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(blmeco)) 
+suppressPackageStartupMessages(library(lme4)) 
+suppressPackageStartupMessages(library(caret))
+suppressPackageStartupMessages(library(glmnet))
+```
+
+<br>
+
+## Read in Data and standardize the numeric predictor variables and oversample
+
+```{r Load data and prep}
+online_shopper <- read_csv("online_shoppers_intention.csv") %>% ## Read in data
+  mutate(Administrative = ((Administrative - mean(Administrative))/sd(Administrative))) %>% ## Standardize by subtracting the mean
+  mutate(Administrative_Duration = ((Administrative_Duration - mean(Administrative_Duration))/sd(Administrative_Duration))) %>% 
+  mutate(Informational = ((Informational - mean(Informational))/sd(Informational))) %>% 
+  mutate(Informational_Duration = ((Informational_Duration - mean(Informational_Duration))/sd(Informational_Duration))) %>% 
+  mutate(ProductRelated = ((ProductRelated - mean(ProductRelated))/sd(ProductRelated))) %>% 
+  mutate(ProductRelated_Duration = ((ProductRelated_Duration - mean(ProductRelated_Duration))/sd(ProductRelated_Duration))) %>% 
+  mutate(BounceRates = ((BounceRates - mean(BounceRates))/sd(BounceRates))) %>% 
+  mutate(ExitRates = ((ExitRates - mean(ExitRates))/sd(ExitRates))) %>% 
+  mutate(PageValues = ((PageValues - mean(PageValues))/sd(PageValues))) %>% 
+  mutate(SpecialDay = ((SpecialDay - mean(SpecialDay))/sd(SpecialDay))) %>% 
+  mutate(Month = as.factor(Month)) %>%
+  mutate(Weekend = as.factor(Weekend)) %>% ## Turn character variables in factors for part two
+  mutate(VisitorType = as.factor(VisitorType)) %>%  
+  mutate(Revenue = ifelse(Revenue == TRUE,1,0))## turn true false statements into one or zero
+```
+
+### Oversampling
+
+```{r Oversample Revenue}
+dat_l_f <- online_shopper %>% 
+  filter(Revenue == "0")
+
+dat_l_t <- online_shopper %>% 
+  filter(Revenue == "1")
+
+m <- online_shopper %>% 
+  filter(Revenue == "0") %>% 
+  nrow()
+
+set.seed(4)
+new_mat <- dat_l_t[sample(1:nrow(dat_l_t),m, replace = TRUE),1:ncol(dat_l_t)] ## This is to oversample the dataset by randomly selecting the rows where Revenue = 1 until we have an even distribution of 0's and 1's
+
+new_dat <- rbind(dat_l_f,new_mat) #combine original dataset with randomly sampled rows
+```
+
+### OHE visitor and month
+
+```{r OHE VisitorType and Month}
+online_shopper_dm <- model.matrix(Revenue~., new_dat)[,-1] ## creates dummy variables for the factor variables (i.e. OHE)
+
+online_shopper_data <- as.data.frame(cbind(online_shopper_dm,new_dat$Revenue)) %>% ## add back revenue column
+  rename(y = V27) 
+
+
+online_shopper_data_oversampled <- online_shopper_data %>% 
+  rename(Revenue = y)
+
+write.csv(online_shopper_data_oversampled,"online_shopper_data_oversampled_standardized.csv")
+```
+
+### Create function to assess classification performance
+
+```{r Create Function to assess model classification performance}
+get_rates <- function(res){
+  tp = res[2,2]
+  tn = res[1,1]
+  fn = res[1,2]
+  fp = res[2,1]
+  print(sprintf('Accuracy: %.3f', (tp+tn)/(tp+fp+tn+fn)))
+  print(sprintf('TPR: %.3f', (tp)/(tp+fn)))
+  print(sprintf('TNR: %.3f', (tn)/(fp+tn)))
+  print(sprintf('FPR: %.3f', (fp)/(fp+tn)))
+  print(sprintf('FNR: %.3f', (fn)/(tp+fn)))
+  print(sprintf('Precision: %.3f', (tp)/(tp+fp)))
+  print(sprintf('Recall: %.3f', (tp)/(tp+fn)))
+  print(sprintf('F1: %.3f', (tp)/(tp+(0.5*(fp+fn)))))
+}
+```
+
+<br>
+
+## Running a best subset selection on oversampled
+
+```{r Load Boruta Package}
+suppressPackageStartupMessages(library(Boruta))
+```
+
+### Create training and test sets
+
+```{r Create training and test datasets}
+online_shopper_data_glm <- as.data.frame(online_shopper_data)
+
+
+set.seed(5)
+
+online_shopper_data_glm <- online_shopper_data_glm[sample(1:nrow(online_shopper_data_glm),length(1:nrow(online_shopper_data_glm))),1:ncol(online_shopper_data_glm)]
+
+
+n <- length(online_shopper_data_glm$y)*0.9
+
+ran_dat <- sample(seq_len(nrow(online_shopper_data_glm)), size = (n))
+
+train_dat <- online_shopper_data_glm[ran_dat,]
+test_dat <- online_shopper_data_glm[-ran_dat,]
+
+
+write.csv(train_dat,"online_shopper_data_oversampled_standardized_train.csv")
+write.csv(test_dat,"online_shopper_data_oversampled_standardized_test.csv")
+```
+
+### Run Boruta Algorithm
+
+```{r Run Boruta Algorithm}
+boruta_output <- Boruta(train_dat$y ~ ., data=na.omit(train_dat), doTrace=0)
+```
+
+### Selected Features
+
+```{r Return important features}
+boruta_signif <- getSelectedAttributes(boruta_output, withTentative = FALSE)
+print(boruta_signif)  
+```
+
+#### Plot Selected Features
+
+```{r Create graph to display variable importance}
+imp <- as.data.frame(boruta_output$ImpHistory) %>% 
+  pivot_longer(cols = 1:29, names_to = "feature", values_to = "importance") %>% 
+  mutate(feature = fct_reorder(feature, importance))
+
+imp %>% 
+  ggplot(aes(x = reorder(feature, importance, FUN = median), y = importance)) + 
+  geom_boxplot(fill = "green", color = "black") +
+  xlab("") +
+  ylab("Variable Importance") +
+  ggtitle("Variable Importance for Oversampled Dataset") +
+  theme(axis.text.x = element_text(angle = 90,hjust=1, size = 9, color = "black"),
+        axis.line.x = element_line(color = "black"), 
+        axis.ticks.x = element_line(color = "black"),
+        axis.line.y = element_line(color = "black"), 
+        panel.background = element_blank())
+```
+
+### Subset the data
+
+```{r Subset data to contain only the important features}
+train_sub <- train_dat %>% 
+  select(Administrative, Administrative_Duration, Informational, Informational_Duration, ProductRelated, ProductRelated_Duration, BounceRates, ExitRates, PageValues, SpecialDay, MonthDec, MonthFeb, MonthJul, MonthJune, MonthMar, MonthMay, MonthNov, MonthOct, MonthSep, OperatingSystems, Browser, Region, TrafficType, VisitorTypeOther, VisitorTypeReturning_Visitor, WeekendTRUE, y) %>% rename(Revenue = y)
+
+test_sub <- test_dat %>% 
+  select(Administrative, Administrative_Duration, Informational, Informational_Duration, ProductRelated, ProductRelated_Duration, BounceRates, ExitRates, PageValues, SpecialDay, MonthDec, MonthFeb, MonthJul, MonthJune, MonthMar, MonthMay, MonthNov, MonthOct, MonthSep, OperatingSystems, Browser, Region, TrafficType, VisitorTypeOther, VisitorTypeReturning_Visitor, WeekendTRUE, y) %>% rename(Revenue = y)
+```
+
+<br>
+
+## GAM on oversampled dataset
+
+```{r Load package for gam}
+suppressPackageStartupMessages(library(mgcv))
+```
+
+### Run GAM
+
+```{r Run GAM}
+m1 <- gam(Revenue ~ s(Administrative, bs = "cs") + s(Administrative_Duration, bs = "cs") + s(Informational, bs = "cs") + s(Informational_Duration, bs = "cs") + s(ProductRelated, bs = "cs") + s(ProductRelated_Duration, bs = "cs") + s(BounceRates, bs = "cs") + s(ExitRates, bs = "cs") + s(PageValues, bs = "cs") + SpecialDay + MonthDec + MonthFeb + MonthJul + MonthJune + MonthMar + MonthMay + MonthNov + MonthOct + MonthSep + OperatingSystems + Browser + Region + TrafficType + VisitorTypeOther + VisitorTypeReturning_Visitor +  WeekendTRUE, data = train_sub, family = binomial)
+```
+
+```{r}
+summary(m1)
+```
+
+
+```{r Check the performance of the model}
+gam.check(m1)
+```
+
+```{r Create X test data}
+test_sub_x <- test_sub[,-27]
+```
+
+
+```{r Predict probabilities of revenue}
+predicted_rev_ov <- predict.gam(m1, test_sub_x, type = "response", se.fit = TRUE, family=binomial)
+```
+
+
+```{r Categorize 0 or 1 based on predicted probability}
+pred_prob_ov <- predicted_rev_ov$fit
+
+pred_prob_ov <- matrix(pred_prob_ov, ncol = 1, nrow = 2085)
+
+pred_rev_gam_ov <- matrix(rep(0,2085), ncol = 1, nrow = 2085)
+
+for (i in 1:2085) {
+  if(pred_prob_ov[i,] > 0.5){
+    pred_rev_gam_ov[i,] <- 1
+  } else if(pred_prob_ov[i,] < 0.5){
+    pred_rev_gam_ov[i,] <- 0
+  }
+}
+```
+
+### Assess model performance
+
+```{r Assess GAM performance}
+resr_gam = table(Predictions = pred_rev_gam_ov, TrueLabels = test_sub$Revenue)
+get_rates(resr_gam)
+```
+
+<br>
+
+## Read in Data and standardize the numeric predictor variables for regular dataset (i.e., not oversampled)
+
+```{r Create OHE on regular imbalanced dataset}
+online_shopper_dm_r <- model.matrix(Revenue~., online_shopper)[,-1] ## creates dummy variables for the factor variables
+
+online_shopper_data_r <- as.data.frame(cbind(online_shopper_dm_r,online_shopper$Revenue)) %>% ## add back revenue column
+  rename(y = V27) 
+
+online_shopper_data_regular <- online_shopper_data_r %>%
+  rename(Revenue = y)
+
+write.csv(online_shopper_data_regular, "online_shopper_data_regular_standardized.csv")
+```
+
+### Create training and test sets
+
+```{r Create training and test sets for regular dataset}
+online_shopper_data_glm_r <- as.data.frame(online_shopper_data_r)
+
+
+set.seed(7)
+
+online_shopper_data_glm_r <- online_shopper_data_glm_r[sample(1:nrow(online_shopper_data_glm_r),length(1:nrow(online_shopper_data_glm_r))),1:ncol(online_shopper_data_glm_r)]
+
+
+n <- length(online_shopper_data_glm_r$y)*0.9
+
+ran_dat_r <- sample(seq_len(nrow(online_shopper_data_glm_r)), size = (n))
+
+train_dat_r <- online_shopper_data_glm_r[ran_dat_r,]
+test_dat_r <- online_shopper_data_glm_r[-ran_dat_r,]
+
+write.csv(train_dat_r,"online_shopper_data_regular_standardized_train.csv")
+write.csv(test_dat_r,"online_shopper_data_regular_standardized_test.csv")
+```
+
+<br>
+
+## Running boruta on regular dataset
+
+```{r}
+boruta_output_r <- Boruta(train_dat_r$y ~ ., data=na.omit(train_dat_r), doTrace=0)
+```
+
+
+```{r}
+boruta_signif_r <- getSelectedAttributes(boruta_output_r, withTentative = FALSE)
+print(boruta_signif_r)  
+```
+
+```{r}
+impr <- as.data.frame(boruta_output_r$ImpHistory) %>% 
+  pivot_longer(cols = 1:29, names_to = "feature", values_to = "importance") %>% 
+  mutate(feature = fct_reorder(feature, importance))
+
+impr %>% 
+  ggplot(aes(x = reorder(feature, importance, FUN = median), y = importance)) + 
+  geom_boxplot(color = "black", fill = "green") +
+  xlab("") +
+  ylab("Variable Importance") +
+  ggtitle("Variable Importance for Regular Imbalanced Dataset") +
+  theme(axis.text.x = element_text(angle = 90,hjust=1, size = 9, color = "black"),
+        axis.line.x = element_line(color = "black"), 
+        axis.ticks.x = element_line(color = "black"),
+        axis.line.y = element_line(color = "black"), 
+        panel.background = element_blank())
+  
+```
+
+```{r}
+train_sub_r <- train_dat_r %>% 
+  select(Administrative, Administrative_Duration, Informational, Informational_Duration, ProductRelated, ProductRelated_Duration, BounceRates, ExitRates, PageValues, MonthDec, MonthMar, MonthMay, MonthNov, MonthOct, OperatingSystems, Browser, TrafficType, VisitorTypeReturning_Visitor, y) %>% rename(Revenue = y)
+
+test_sub_r <- test_dat_r %>% 
+  select(Administrative, Administrative_Duration, Informational, Informational_Duration, ProductRelated, ProductRelated_Duration, BounceRates, ExitRates, PageValues, MonthDec, MonthMar, MonthMay, MonthNov, MonthOct, OperatingSystems, Browser, TrafficType, VisitorTypeReturning_Visitor, y) %>% rename(Revenue = y)
+```
+
+<br>
+
+## gam on regular dataset
+
+```{r}
+library(mgcv)
+```
+
+```{r}
+m5 <- gam(Revenue ~ s(Administrative, bs = "cs") + s(Administrative_Duration, bs = "cs") + s(Informational, bs = "cs") + s(Informational_Duration, bs = "cs") + s(ProductRelated, bs = "cs") + s(ProductRelated_Duration, bs = "cs") + s(BounceRates, bs = "cs") + s(ExitRates, bs = "cs") + s(PageValues, bs = "cs") + MonthDec + MonthMar + MonthMay + MonthNov + MonthOct + OperatingSystems + Browser + TrafficType + VisitorTypeReturning_Visitor, data = train_sub_r, family = binomial)
+```
+
+```{r}
+summary(m5)
+```
+
+```{r}
+gam.check(m5)
+```
+
+```{r}
+test_sub_xr <- test_sub_r[,-19]
+```
+
+
+```{r}
+predicted_rev <- predict.gam(m5, test_sub_xr, type = "response", se.fit = TRUE, family = binomial)
+```
+
+
+```{r}
+pred_prob <- predicted_rev$fit
+
+pred_prob <- matrix(pred_prob, ncol = 1, nrow = 1233)
+
+pred_rev_gam <- matrix(rep(0,1233), ncol = 1, nrow = 1233)
+
+for (i in 1:1233) {
+  if(pred_prob[i,] > 0.5){
+    pred_rev_gam[i,] <- 1
+  } else if(pred_prob[i,] < 0.5){
+    pred_rev_gam[i,] <- 0
+  }
+}
+```
+
+```{r}
+resr_gam = table(Predictions = pred_rev_gam, TrueLabels = test_sub_r$Revenue)
+get_rates(resr_gam)
+```
+
+<br>
+
+## All categorical variables OHE for the oversampled dataset
+
+```{r Load in Data}
+online_shopper_ch <- read_csv("online_shoppers_intention.csv") %>% ## Read in data
+  mutate(Administrative = ((Administrative - mean(Administrative))/sd(Administrative))) %>% ## Standardize by subtracting the mean
+  mutate(Administrative_Duration = ((Administrative_Duration - mean(Administrative_Duration))/sd(Administrative_Duration))) %>% 
+  mutate(Informational = ((Informational - mean(Informational))/sd(Informational))) %>% 
+  mutate(Informational_Duration = ((Informational_Duration - mean(Informational_Duration))/sd(Informational_Duration))) %>% 
+  mutate(ProductRelated = ((ProductRelated - mean(ProductRelated))/sd(ProductRelated))) %>% 
+  mutate(ProductRelated_Duration = ((ProductRelated_Duration - mean(ProductRelated_Duration))/sd(ProductRelated_Duration))) %>% 
+  mutate(BounceRates = ((BounceRates - mean(BounceRates))/sd(BounceRates))) %>% 
+  mutate(ExitRates = ((ExitRates - mean(ExitRates))/sd(ExitRates))) %>% 
+  mutate(PageValues = ((PageValues - mean(PageValues))/sd(PageValues))) %>% 
+  mutate(SpecialDay = ((SpecialDay - mean(SpecialDay))/sd(SpecialDay))) %>% 
+  mutate(OperatingSystems = as.factor(OperatingSystems)) %>%
+  mutate(Browser = as.factor(Browser)) %>%
+  mutate(Region = as.factor(Region)) %>%
+  mutate(TrafficType = as.factor(TrafficType)) %>%
+  mutate(Month = as.factor(Month)) %>%
+  mutate(Weekend = as.factor(Weekend)) %>% ## Turncharacter variables in factors for part two
+  mutate(VisitorType = as.factor(VisitorType)) %>%  
+  mutate(Revenue = ifelse(Revenue == TRUE,1,0))## turn true false statements into one or zero
+```
+
+
+```{r Oversample}
+dat_l_f_ch <- online_shopper_ch %>% 
+  filter(Revenue == "0")
+
+dat_l_t_ch <- online_shopper_ch %>% 
+  filter(Revenue == "1")
+
+m <- online_shopper_ch %>% 
+  filter(Revenue == "0") %>% 
+  nrow()
+
+set.seed(4)
+new_mat_ch <- dat_l_t_ch[sample(1:nrow(dat_l_t_ch),m, replace = TRUE),1:ncol(dat_l_t_ch)] ## This is to oversample the dataset by randomly selecting the columns where Revenue = 1 until we have an even distribution of 0's and 1's
+
+new_dat_ch <- rbind(dat_l_f_ch,new_mat_ch)
+```
+
+```{r Create OHE}
+online_shopper_dm_ch <- model.matrix(Revenue~., new_dat_ch)[,-1] ## creates dummy variables for the factor variables
+
+online_shopper_data_ch <- as.data.frame(cbind(online_shopper_dm_ch,new_dat_ch$Revenue)) %>% ## add back revenue column
+  rename(y = V69)  
+```
+
+```{r}
+online_shopper_data_oversampled_allOHE = online_shopper_data_ch %>% 
+  rename(Revenue = y)
+
+write.csv(online_shopper_data_oversampled_allOHE,"online_shopper_data_oversampled_allOHE_standardized.csv")
+```
+
+```{r Create Training and Test sets}
+online_shopper_data_glm_ch <- as.data.frame(online_shopper_data_ch)
+
+
+set.seed(10)
+
+online_shopper_data_glm_ch <- online_shopper_data_glm_ch[sample(1:nrow(online_shopper_data_glm_ch),length(1:nrow(online_shopper_data_glm_ch))),1:ncol(online_shopper_data_glm_ch)]
+
+
+n <- length(online_shopper_data_glm_ch$y)*0.9
+
+ran_dat_ch <- sample(seq_len(nrow(online_shopper_data_glm_ch)), size = (n))
+
+train_dat_ch <- online_shopper_data_glm_ch[ran_dat_ch,]
+test_dat_ch <- online_shopper_data_glm_ch[-ran_dat_ch,]
+
+write.csv(train_dat_ch,"online_shopper_data_oversampled_allOHE_standardized_train.csv")
+write.csv(test_dat_ch,"online_shopper_data_oversampled_allOHE_standardized_test.csv")
+```
+
+<br>
+
+## Feature selection on oversampled all OHE
+
+```{r}
+boruta_output_ch <- Boruta(train_dat_ch$y ~ ., data=na.omit(train_dat_ch), doTrace=0)
+```
+
+```{r}
+avg_imp <- as.data.frame(matrix(rep(0,71), ncol = 71, nrow = 1))
+
+for (j in 1:71) {
+  avg_imp[,j] <- mean(boruta_output_ch$ImpHistory[,j])
+}
+
+colnames(avg_imp) <- colnames(boruta_output_ch$ImpHistory)
+
+avg_imp %>% 
+  pivot_longer(c(1:71), names_to = "Feature", values_to = "Avg_Importance") %>% 
+  arrange(-Avg_Importance)
+```
+
+```{r}
+boruta_signif_ch <- getSelectedAttributes(boruta_output_ch, withTentative = FALSE)
+print(boruta_signif_ch)  
+```
+
+```{r}
+med_imp_ov <- as.data.frame(boruta_output_ch$ImpHistory) %>% 
+  pivot_longer(cols = 1:71, names_to = "feature", values_to = "importance") %>% 
+  group_by(feature) %>% 
+  summarise("median_importance" = median(importance)) %>% 
+  arrange(-median_importance)
+
+
+med_imp_ov_thrity <- med_imp_ov[1:30,]
+
+
+  as.data.frame(boruta_output_ch$ImpHistory) %>% 
+  pivot_longer(cols = 1:71, names_to = "feature", values_to = "importance") %>% 
+  mutate(feature = fct_reorder(feature, importance)) %>% 
+  filter(feature %in% med_imp_ov_thrity$feature) %>% 
+  ggplot(aes(x = reorder(feature, importance, FUN = median), y = importance)) + 
+  geom_boxplot(color = "black", fill = "green") +
+  xlab("") +
+  ylab("Variable Importance") +
+  ylim(0,120) +
+  ggtitle("Variable Importance for Oversampled Dataset with all OHE") +
+  theme(axis.text.x = element_text(angle = 90,hjust=1, size = 9, color = "black"),
+        axis.line.x = element_line(color = "black"), 
+        axis.ticks.x = element_line(color = "black"),
+        axis.line.y = element_line(color = "black"), 
+        panel.background = element_blank())
+```
+
+
+```{r Select Features}
+train_sub_ch <- train_dat_ch %>% 
+  select(Administrative, Administrative_Duration, Informational, Informational_Duration, ProductRelated, ProductRelated_Duration, BounceRates, ExitRates, PageValues, SpecialDay, MonthDec, MonthFeb, MonthJul, MonthJune, MonthMar, MonthMay, MonthNov, MonthOct, MonthSep, OperatingSystems2, OperatingSystems3, OperatingSystems4, OperatingSystems6, OperatingSystems7, OperatingSystems8, Browser2, Browser3, Browser4, Browser5, Browser6, Browser7, Browser8, Browser10, Browser12, Browser13, Region2, Region3, Region4, Region5, Region6, Region7, Region8, Region9, TrafficType2, TrafficType3, TrafficType4, TrafficType5, TrafficType6, TrafficType7, TrafficType8, TrafficType9, TrafficType10, TrafficType11, TrafficType13, TrafficType15, TrafficType16, TrafficType20, VisitorTypeOther, VisitorTypeReturning_Visitor, WeekendTRUE, y) %>% rename(Revenue = y)
+
+test_sub_ch <- test_dat_ch %>% 
+  select(Administrative, Administrative_Duration, Informational, Informational_Duration, ProductRelated, ProductRelated_Duration, BounceRates, ExitRates, PageValues, SpecialDay, MonthDec, MonthFeb, MonthJul, MonthJune, MonthMar, MonthMay, MonthNov, MonthOct, MonthSep, OperatingSystems2, OperatingSystems3, OperatingSystems4, OperatingSystems6, OperatingSystems7, OperatingSystems8, Browser2, Browser3, Browser4, Browser5, Browser6, Browser7, Browser8, Browser10, Browser12, Browser13, Region2, Region3, Region4, Region5, Region6, Region7, Region8, Region9, TrafficType2, TrafficType3, TrafficType4, TrafficType5, TrafficType6, TrafficType7, TrafficType8, TrafficType9, TrafficType10, TrafficType11, TrafficType13, TrafficType15, TrafficType16, TrafficType20, VisitorTypeOther, VisitorTypeReturning_Visitor, WeekendTRUE, y) %>% rename(Revenue = y)
+```
+
+<br>
+
+## GAM on oversampled all OHE
+
+```{r}
+library(mgcv)
+```
+
+```{r}
+m8 <- gam(Revenue ~ s(Administrative, bs = "cs") + s(Administrative_Duration, bs = "cs") + s(Informational, bs = "cs") + s(Informational_Duration, bs = "cs") + s(ProductRelated, bs = "cs") + s(ProductRelated_Duration, bs = "cs") + s(BounceRates, bs = "cs") + s(ExitRates, bs = "cs") + s(PageValues, bs = "cs") + SpecialDay + MonthDec + MonthFeb + MonthJul + MonthJune + MonthMar + MonthMay + MonthNov + MonthOct + MonthSep + OperatingSystems2 + OperatingSystems3 + OperatingSystems4 + OperatingSystems6 + OperatingSystems7 + OperatingSystems8 + Browser2 + Browser3 + Browser4 + Browser5 + Browser6 + Browser7 + Browser8 + Browser10 + Browser12 + Browser13 + Region2 + Region3 + Region4 + Region5 + Region6 + Region7 + Region8 + Region9 + TrafficType2 + TrafficType3 + TrafficType4 + TrafficType5 + TrafficType6 + TrafficType7 + TrafficType8 + TrafficType9 + TrafficType10 + TrafficType11 + TrafficType13 + TrafficType15 + TrafficType16 + TrafficType20 + VisitorTypeOther + VisitorTypeReturning_Visitor + WeekendTRUE, data = train_sub_ch, family = binomial)
+```
+
+```{r}
+summary(m8)
+```
+
+```{r}
+gam.check(m8)
+```
+
+
+```{r}
+test_sub_x_ch <- test_sub_ch[,-61]
+```
+
+
+```{r}
+predicted_rev_ov_ch <- predict.gam(m8, test_sub_x_ch, type = "response", se.fit = TRUE, family=binomial)
+```
+
+
+```{r}
+pred_prob_ov_ch <- predicted_rev_ov_ch$fit
+
+pred_prob_ov_ch <- matrix(pred_prob_ov_ch, ncol = 1, nrow = 2085)
+
+pred_rev_gam_ov_ch <- matrix(rep(0,2085), ncol = 1, nrow = 2085)
+
+for (i in 1:2085) {
+  if(pred_prob_ov_ch[i,] > 0.5){
+    pred_rev_gam_ov_ch[i,] <- 1
+  } else if(pred_prob_ov_ch[i,] < 0.5){
+    pred_rev_gam_ov_ch[i,] <- 0
+  }
+}
+```
+
+```{r}
+resr_gam_ch = table(Predictions = pred_rev_gam_ov_ch, TrueLabels = test_sub_ch$Revenue)
+get_rates(resr_gam_ch)
+```
+
+<br>
+
+## All categorical variables OHE for regular dataset
+
+```{r}
+online_shopper_ch <- read_csv("online_shoppers_intention.csv") %>% ## Read in data
+  mutate(Administrative = ((Administrative - mean(Administrative))/sd(Administrative))) %>% ## Standardize by subtracting the mean
+  mutate(Administrative_Duration = ((Administrative_Duration - mean(Administrative_Duration))/sd(Administrative_Duration))) %>% 
+  mutate(Informational = ((Informational - mean(Informational))/sd(Informational))) %>% 
+  mutate(Informational_Duration = ((Informational_Duration - mean(Informational_Duration))/sd(Informational_Duration))) %>% 
+  mutate(ProductRelated = ((ProductRelated - mean(ProductRelated))/sd(ProductRelated))) %>% 
+  mutate(ProductRelated_Duration = ((ProductRelated_Duration - mean(ProductRelated_Duration))/sd(ProductRelated_Duration))) %>% 
+  mutate(BounceRates = ((BounceRates - mean(BounceRates))/sd(BounceRates))) %>% 
+  mutate(ExitRates = ((ExitRates - mean(ExitRates))/sd(ExitRates))) %>% 
+  mutate(PageValues = ((PageValues - mean(PageValues))/sd(PageValues))) %>% 
+  mutate(SpecialDay = ((SpecialDay - mean(SpecialDay))/sd(SpecialDay))) %>% 
+  mutate(OperatingSystems = as.factor(OperatingSystems)) %>%
+  mutate(Browser = as.factor(Browser)) %>%
+  mutate(Region = as.factor(Region)) %>%
+  mutate(TrafficType = as.factor(TrafficType)) %>%
+  mutate(Month = as.factor(Month)) %>%
+  mutate(Weekend = as.factor(Weekend)) %>% ## Turncharacter variables in factors for part two
+  mutate(VisitorType = as.factor(VisitorType)) %>%  
+  mutate(Revenue = ifelse(Revenue == TRUE,1,0))## turn true false statements into one or zero
+```
+
+```{r}
+online_shopper_dm_ch2 <- model.matrix(Revenue~., online_shopper_ch)[,-1] ## creates dummy variables for the factor variables
+
+online_shopper_data_ch2 <- as.data.frame(cbind(online_shopper_dm_ch2,online_shopper_ch$Revenue)) %>% ## add back revenue column
+  rename(y = V69)  
+```
+
+```{r}
+online_shopper_data_regular_allOHE = online_shopper_data_ch2 %>% 
+  rename(Revenue = y)
+
+write.csv(online_shopper_data_regular_allOHE,"online_shopper_data_regular_allOHE_standardized2.csv")
+```
+
+```{r}
+online_shopper_data_glm_ch2 <- as.data.frame(online_shopper_data_ch2)
+
+
+set.seed(13)
+
+online_shopper_data_glm_ch2 <- online_shopper_data_glm_ch2[sample(1:nrow(online_shopper_data_glm_ch2),length(1:nrow(online_shopper_data_glm_ch2))),1:ncol(online_shopper_data_glm_ch2)]
+
+
+n <- length(online_shopper_data_glm_ch2$y)*0.9
+
+ran_dat_ch2 <- sample(seq_len(nrow(online_shopper_data_glm_ch2)), size = (n))
+
+train_dat_ch2 <- online_shopper_data_glm_ch2[ran_dat_ch2,]
+test_dat_ch2 <- online_shopper_data_glm_ch2[-ran_dat_ch2,]
+
+write.csv(train_dat_ch2,"online_shopper_data_regular_allOHE_standardized_train.csv")
+write.csv(test_dat_ch2,"online_shopper_data_regular_allOHE_standardized_test.csv")
+```
+
+<br>
+
+## Feature selection on regular all OHE
+
+```{r}
+boruta_output_ch2 <- Boruta(train_dat_ch2$y ~ ., data=na.omit(train_dat_ch2), doTrace=0)
+```
+
+```{r}
+avg_imp <- as.data.frame(matrix(rep(0,71), ncol = 71, nrow = 1))
+
+for (j in 1:71) {
+  avg_imp[,j] <- mean(boruta_output_ch$ImpHistory[,j])
+}
+
+colnames(avg_imp) <- colnames(boruta_output_ch$ImpHistory)
+
+avg_imp %>% 
+  pivot_longer(c(1:71), names_to = "Feature", values_to = "Avg_Importance") %>% 
+  arrange(-Avg_Importance)
+```
+
+```{r}
+boruta_signif_ch2 <- getSelectedAttributes(boruta_output_ch2, withTentative = FALSE)
+print(boruta_signif_ch2)  
+```
+
+
+```{r}
+med_imp_r <- as.data.frame(boruta_output_ch2$ImpHistory) %>% 
+  pivot_longer(cols = 1:71, names_to = "feature", values_to = "importance") %>% 
+  group_by(feature) %>% 
+  summarise("median_importance" = median(importance)) %>% 
+  arrange(-median_importance)
+
+
+med_imp_r_thrity <- med_imp_r[1:30,]
+
+
+  as.data.frame(boruta_output_ch2$ImpHistory) %>% 
+  pivot_longer(cols = 1:71, names_to = "feature", values_to = "importance") %>% 
+  mutate(feature = fct_reorder(feature, importance)) %>% 
+  filter(feature %in% med_imp_r_thrity$feature) %>% 
+  ggplot(aes(x = reorder(feature, importance, FUN = median), y = importance)) + 
+  geom_boxplot(color = "black", fill = "green") +
+  xlab("") +
+  ylab("Variable Importance") +
+  ylim(0,100) + 
+  ggtitle("Variable Importance for Oversampled Dataset with all OHE") +
+  theme(axis.text.x = element_text(angle = 90,hjust=1, size = 9, color = "black"),
+        axis.line.x = element_line(color = "black"), 
+        axis.ticks.x = element_line(color = "black"),
+        axis.line.y = element_line(color = "black"), 
+        panel.background = element_blank())
+```
+
+
+```{r}
+train_sub_ch2 <- train_dat_ch2 %>% 
+  select(Administrative, Administrative_Duration, Informational, Informational_Duration, ProductRelated, ProductRelated_Duration, BounceRates, ExitRates, PageValues, MonthDec, MonthMar, MonthMay, MonthNov, MonthOct, OperatingSystems2, OperatingSystems3, TrafficType13, VisitorTypeReturning_Visitor, y) %>% rename(Revenue = y)
+
+test_sub_ch2 <- test_dat_ch2 %>% 
+  select(Administrative, Administrative_Duration, Informational, Informational_Duration, ProductRelated, ProductRelated_Duration, BounceRates, ExitRates, PageValues, MonthDec, MonthMar, MonthMay, MonthNov, MonthOct, OperatingSystems2, OperatingSystems3, TrafficType13, VisitorTypeReturning_Visitor, y) %>% rename(Revenue = y)
+```
+
+<br>
+
+## GAM on regular with all OHE
+
+```{r}
+library(mgcv)
+```
+
+```{r}
+m11 <- gam(Revenue ~ s(Administrative, bs = "cs") + s(Administrative_Duration, bs = "cs") + s(Informational, bs = "cs") + s(Informational_Duration, bs = "cs") + s(ProductRelated, bs = "cs") + s(ProductRelated_Duration, bs = "cs") + s(BounceRates, bs = "cs") + s(ExitRates, bs = "cs") + s(PageValues, bs = "cs") + MonthDec + MonthMar + MonthMay + MonthNov + MonthOct + OperatingSystems2 + OperatingSystems3 + TrafficType13 +  VisitorTypeReturning_Visitor, data = train_sub_ch2, family = binomial)
+```
+
+```{r}
+summary(m11)
+```
+
+
+```{r}
+gam.check(m11)
+```
+
+
+```{r}
+test_sub_x_ch2 <- test_sub_ch2[,-19]
+```
+
+
+```{r}
+predicted_rev_ov_ch2 <- predict.gam(m11, test_sub_x_ch2, type = "response", se.fit = TRUE, family=binomial)
+```
+
+
+```{r}
+pred_prob_ov_ch2 <- predicted_rev_ov_ch2$fit
+
+pred_prob_ov_ch2 <- matrix(pred_prob_ov_ch2, ncol = 1, nrow = 1233)
+
+pred_rev_gam_ov_ch2 <- matrix(rep(0,1233), ncol = 1, nrow = 1233)
+
+for (i in 1:1233) {
+  if(pred_prob_ov_ch2[i,] > 0.5){
+    pred_rev_gam_ov_ch2[i,] <- 1
+  } else if(pred_prob_ov_ch2[i,] < 0.5){
+    pred_rev_gam_ov_ch2[i,] <- 0
+  }
+}
+```
+
+
+```{r}
+resr_gam_ch2 = table(Predictions = pred_rev_gam_ov_ch2, TrueLabels = test_sub_ch2$Revenue)
+get_rates(resr_gam_ch2)
+```
+
+<br>
+
+## Plotting non-linear relationship between continuous variables and Revenue
+
+```{r}
+train_dat_ch %>% 
+  select(y, Administrative, Informational, ProductRelated, 
+         Administrative_Duration, Informational_Duration, ProductRelated_Duration, 
+         BounceRates, ExitRates, PageValues) %>% 
+  pivot_longer(c(2:10), names_to = "Cont_Variables", values_to = "Values") %>% 
+  ggplot(aes(y = y, x = Values)) +
+  geom_point() +
+  geom_smooth(method = "gam",method.args = list(family = "binomial"), formula =  y ~ s(x, bs = "cs", k = 9)) + 
+  facet_wrap(~Cont_Variables, scales = "free") +
+  ylab("Revenue")
+```
+
+
+<br>

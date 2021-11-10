@@ -1,0 +1,149 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+```{r}
+
+
+library(keras)
+library(tfdatasets)
+library(tidyverse)
+library(rsample)
+```
+
+```{r}
+d1 = 512
+d2 = 256
+d3 = 64
+epochs = 60
+batch_size = 32
+prop = 4/5
+```
+
+
+```{r}
+filepath <-"/Users/Will1/Desktop/stsciproj/STSCI4740Project/data/regular/whole_data.csv"
+df = read.csv(filepath)
+#df=subset (df, select = -1)
+
+```
+
+```{r}
+glimpse(df)
+```
+
+
+
+```{r}
+split <- initial_split(df, prop)
+train <- training(split)
+test <- testing(split)
+
+ #the we split the training set into validation and training
+split <- initial_split(train, prop)
+train <- training(split)
+val <- testing(split)
+```
+
+
+```{r}
+df_to_dataset <- function(df, shuffle = TRUE, batch_size = batch_size) {
+  ds <- df %>% 
+    tensor_slices_dataset()
+  
+  if (shuffle)
+    ds <- ds %>% dataset_shuffle(buffer_size = nrow(df))
+  
+  ds %>% 
+    dataset_batch(batch_size = batch_size)
+}
+```
+
+Here the pipeline transform the dataframes into smaller datasets to avoid memory overload
+```{r}
+
+
+train_ds <- df_to_dataset(train, batch_size = batch_size)
+val_ds <- df_to_dataset(val, shuffle = FALSE, batch_size = batch_size)
+test_ds <- df_to_dataset(test, shuffle = FALSE, batch_size = batch_size)
+
+```
+
+Here the pipeline transforms the features, normalization, binning, one hot encoding etc. can all be done here
+```{r}
+spec <- feature_spec(train_ds, Revenue ~ . ) %>% 
+  step_numeric_column(all_numeric(), normalizer_fn = scaler_standard()) %>%   
+  fit()
+```
+
+here is the model, in its design along with several hyperparameters
+```{r}
+model <- keras_model_sequential() %>% 
+  layer_dense_features(dense_features(spec)) %>% 
+  layer_dense(units = d1, activation = "relu",activity_regularizer=regularizer_l2(l = 0.5)) %>% 
+  layer_dense(units = d2, activation = "relu") %>% 
+  layer_dense(units = d3, activation = "relu") %>% 
+  layer_dense(units = 1, activation = "sigmoid")
+
+model %>% compile(
+  loss = loss_binary_crossentropy, 
+  optimizer = optimizer_adam(
+  lr = 0.0005,
+  beta_1 = 0.99,
+  beta_2 = 0.999,
+  epsilon = 0.00000001,
+  decay = 0.0005,
+  amsgrad = FALSE,
+  clipnorm = NULL,
+  clipvalue = NULL
+), 
+  metrics = "binary_accuracy"
+)
+```
+
+Here the model is fitted and trained 
+```{r}
+
+history <- model %>% 
+  fit(
+    dataset_use_spec(train_ds, spec = spec),
+    epochs = epochs, 
+    validation_data = dataset_use_spec(val_ds, spec),
+    verbose = 2,callbacks=list(callback_early_stopping(patience=20,restore_best_weights=TRUE))
+    )
+
+```
+
+final testing metrics are calculated here
+```{R}
+
+pred <- round(predict(model, test))
+
+tbl=table(pred,test$Revenue)
+
+#total negative and posititve Revenues
+tn_total=sum(tbl[,1])
+tp_total=sum(tbl[,2])
+#True negative and True positive
+tn=tbl[1,1]/tn_total
+tp=tbl[2,2]/tp_total
+#false negative and false positive
+fp=tbl[2,1]/tp_total
+fn=tbl[1,2]/tn_total
+
+#f1 score
+f1 = tp/(tp+(1/2)* (fp+fn))
+
+table(Predictions = pred, TrueLabels = test$Revenue)
+acc = (tbl[1,1]+tbl[2,2])/(tbl[1,1]+tbl[1,2]+tbl[2,1]+tbl[2,2])
+
+acc
+tp
+tn
+f1
+
+```
+
+

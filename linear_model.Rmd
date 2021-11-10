@@ -1,0 +1,205 @@
+---
+title: "linear_model"
+author: ""
+date: "4/24/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+```{r}
+install.packages('Boruta')
+install.packages('caret')
+install.packages('glmnet')
+
+suppressPackageStartupMessages(library(Boruta))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(caret))
+suppressPackageStartupMessages(library(glmnet))
+
+```
+```{r}
+get_rates <- function(res){
+  tp = res[2,2]
+  tn = res[1,1]
+  fn = res[1,2]
+  fp = res[2,1]
+  print(sprintf('Accuracy: %.3f', (tp+tn)/(tp+fp+tn+fn)))
+  print(sprintf('TPR: %.3f', (tp)/(tp+fn)))
+  print(sprintf('TNR: %.3f', (tn)/(fp+tn)))
+  print(sprintf('FPR: %.3f', (fp)/(fp+tn)))
+  print(sprintf('FNR: %.3f', (fn)/(tp+fn)))
+  print(sprintf('Precision: %.3f', (tp)/(tp+fp)))
+  print(sprintf('Recall: %.3f', (tp)/(tp+fn)))
+  print(sprintf('F1: %.3f', (tp)/(tp+(0.5*(fp+fn)))))
+}
+
+```
+
+## Summary statistics
+```{r cars}
+online_shopper <- read_csv("online_shoppers_intention.csv") ## Read in data
+summary(online_shopper)
+```
+## Train-test split
+```{r}
+train_size <- floor(0.90 * nrow(online_shopper))
+in_rows <- sample(c(1:nrow(online_shopper)), size = train_size, replace = FALSE)
+train <- online_shopper[in_rows, ]
+test <- online_shopper[-in_rows, ]
+```
+
+## Boruta feature selection
+
+```{r}
+boruta_output <- Boruta(train$Revenue ~ ., data=na.omit(train), doTrace=0)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r}
+boruta_signif <- getSelectedAttributes(boruta_output, withTentative = FALSE)
+print(boruta_signif)  
+plot(boruta_output, cex.axis=.7, las=2, xlab="", main="Variable Importance")
+```
+
+## Features transformation
+Any categorical variables that are significant we can use one hot encoding to represent
+
+```{r}
+train_sub = train[ , -which(names(train) %in% c("shadowMin","shadowMean","SpecialDay", "region", "Weekend", "shadowMax", "Browser"))]
+test_sub = test[ , -which(names(test) %in% c("shadowMin","shadowMean","SpecialDay", "region", "Weekend", "shadowMax", "Browser"))]
+encode <- function(df){
+  df = as.data.frame(df)
+  df$Revenue <- ifelse(df$Revenue=="TRUE",1,0)
+  # perform OHE
+  df_encoded <- dummyVars(" ~ .", data = df)
+  df_encoded <- data.frame(predict(df_encoded, newdata = df))
+  # scale specified columns
+  cols <- c("Administrative","Administrative_Duration","ProductRelated", "ProductRelated_Duration","BounceRates", "ExitRates","Region","TrafficType")
+  df_encoded[cols] <- scale(df_encoded[cols])
+  return(df_encoded)
+}
+train_enc <- encode(train_sub)
+test_enc <- encode(test_sub)
+```
+
+
+```{r}
+
+# Train
+print("Train")
+data = train_sub
+x = data[ , -which(names(data) %in% c("Revenue"))]
+y = data$Revenue
+y = ifelse(y=="TRUE",1,0)
+glm.fit <- glm(y ~ ., data = x, family = binomial("logit"),maxit = 100)
+glm.probs <- predict(glm.fit, newdata=x, type="response")
+glm.pred <- ifelse(glm.probs > 0.5, 1, 0)
+res = table(Predictions = glm.pred, TrueLabels = y)
+get_rates(res)
+
+# Test
+print("Test")
+data = test_sub
+x = data[ , -which(names(data) %in% c("Revenue"))]
+y = data$Revenue
+y = ifelse(y=="TRUE",1,0)
+glm.probs <- predict(glm.fit, newdata=x, type="response")
+glm.pred <- ifelse(glm.probs > 0.5, 1, 0)
+res = table(Predictions = glm.pred, TrueLabels = y)
+get_rates(res)
+```
+
+```{r}
+oversampled = TRUE
+allOHE = TRUE
+if (allOHE==TRUE) {
+  if (oversampled==TRUE) {
+    online_shopper <- read_csv("datasets/osd_ov_allOHE.csv") 
+  } else {
+    online_shopper <- read_csv("datasets/osd_reg_allOHE.csv") 
+  }
+} else {
+  if (oversampled==TRUE) {
+    online_shopper <- read_csv("datasets/osd_ov.csv") 
+  } else {
+    online_shopper <- read_csv("datasets/osd_reg.csv") 
+  }
+}
+online_shopper <- as.data.frame(online_shopper)
+online_shopper <- online_shopper[,-1] # drop index
+
+set.seed(5)
+
+n <- floor(0.90 * nrow(online_shopper))
+in_rows <- sample(c(1:nrow(online_shopper)), size = n, replace = FALSE)
+
+train_dat <- online_shopper[in_rows,]
+test_dat <- online_shopper[-in_rows,]
+
+#boruta_output <- Boruta(train_dat$Revenue ~ ., data=na.omit(train_dat), doTrace=0)
+#boruta_signif <- getSelectedAttributes(boruta_output, withTentative = FALSE)
+#print(boruta_signif)  
+#plot(boruta_output, cex.axis=.7, las=2, xlab="", main="Variable Importance")
+```
+
+```{r}
+if (allOHE==TRUE) {
+  if (oversampled==TRUE){
+    train_sub <- train_dat %>%
+      select(Administrative, Administrative_Duration, Informational, Informational_Duration, ProductRelated, ProductRelated_Duration, BounceRates, ExitRates, PageValues, SpecialDay, MonthDec, MonthFeb, MonthJul, MonthJune, MonthMar, MonthMay, MonthNov, MonthOct, MonthSep, OperatingSystems2, OperatingSystems3, OperatingSystems4, OperatingSystems6, OperatingSystems7, OperatingSystems8, Browser2, Browser3, Browser4, Browser5, Browser6, Browser7, Browser8, Browser10, Browser12, Browser13, Region2, Region3, Region4, Region5, Region6, Region7, Region8, Region9, TrafficType2, TrafficType3, TrafficType4, TrafficType5, TrafficType6, TrafficType7, TrafficType8, TrafficType9, TrafficType10, TrafficType11, TrafficType13, TrafficType15, TrafficType16, TrafficType20, VisitorTypeOther, VisitorTypeReturning_Visitor, WeekendTRUE, Revenue)
+    test_sub <- test_dat %>%
+      select(Administrative, Administrative_Duration, Informational, Informational_Duration, ProductRelated, ProductRelated_Duration, BounceRates, ExitRates, PageValues, SpecialDay, MonthDec, MonthFeb, MonthJul, MonthJune, MonthMar, MonthMay, MonthNov, MonthOct, MonthSep, OperatingSystems2, OperatingSystems3, OperatingSystems4, OperatingSystems6, OperatingSystems7, OperatingSystems8, Browser2, Browser3, Browser4, Browser5, Browser6, Browser7, Browser8, Browser10, Browser12, Browser13, Region2, Region3, Region4, Region5, Region6, Region7, Region8, Region9, TrafficType2, TrafficType3, TrafficType4, TrafficType5, TrafficType6, TrafficType7, TrafficType8, TrafficType9, TrafficType10, TrafficType11, TrafficType13, TrafficType15, TrafficType16, TrafficType20, VisitorTypeOther, VisitorTypeReturning_Visitor, WeekendTRUE, Revenue)
+  } else {
+    train_sub <- train_dat %>%
+      select(Administrative, Administrative_Duration, Informational, Informational_Duration, ProductRelated, ProductRelated_Duration, BounceRates, ExitRates, PageValues, MonthDec, MonthMar, MonthMay, MonthNov, MonthOct, OperatingSystems2, OperatingSystems3, TrafficType13, VisitorTypeReturning_Visitor, Revenue)
+    test_sub <- test_dat %>% 
+      select(Administrative, Administrative_Duration, Informational, Informational_Duration, ProductRelated, ProductRelated_Duration, BounceRates, ExitRates, PageValues, MonthDec, MonthMar, MonthMay, MonthNov, MonthOct, OperatingSystems2, OperatingSystems3, TrafficType13, VisitorTypeReturning_Visitor, Revenue)
+  }
+} else {
+  if (oversampled==TRUE){
+    train_sub <- train_dat %>% 
+      select(Administrative,Administrative_Duration,Informational,Informational_Duration,ProductRelated,ProductRelated_Duration,BounceRates,ExitRates,PageValues,SpecialDay,MonthDec,MonthFeb,MonthJul,MonthJune,MonthMar,MonthMay,MonthNov,MonthOct,MonthSep,OperatingSystems,Browser,Region,TrafficType,VisitorTypeOther,VisitorTypeReturning_Visitor,WeekendTRUE, Revenue)
+    
+    test_sub <- test_dat %>% 
+      select(Administrative,Administrative_Duration,Informational,Informational_Duration,ProductRelated,ProductRelated_Duration,BounceRates,ExitRates,PageValues,SpecialDay,MonthDec,MonthFeb,MonthJul,MonthJune,MonthMar,MonthMay,MonthNov,MonthOct,MonthSep,OperatingSystems,Browser,Region,TrafficType,VisitorTypeOther,VisitorTypeReturning_Visitor,WeekendTRUE, Revenue)
+  } else {
+    train_sub <- train_dat %>% 
+      select(Administrative,Administrative_Duration,Informational,Informational_Duration,ProductRelated,ProductRelated_Duration,BounceRates,ExitRates,PageValues,MonthDec,MonthMar,MonthMay,MonthNov,MonthOct,OperatingSystems,Browser,TrafficType,VisitorTypeReturning_Visitor,Revenue)
+    
+    test_sub <- test_dat %>% 
+      select(Administrative,Administrative_Duration,Informational,Informational_Duration,ProductRelated,ProductRelated_Duration,BounceRates,ExitRates,PageValues,MonthDec,MonthMar,MonthMay,MonthNov,MonthOct,OperatingSystems,Browser,TrafficType,VisitorTypeReturning_Visitor,Revenue)
+  }
+}
+# Train
+print("Train")
+data = train_sub
+x = data[ , -which(names(data) %in% c("Revenue"))]
+y = data$Revenue
+glm.fit <- glm(y ~ ., data = x, family = binomial("logit"),maxit = 10)
+glm.probs <- predict(glm.fit, newdata=x, type="response")
+glm.pred <- ifelse(glm.probs > 0.5, 1, 0)
+res = table(Predictions = glm.pred, TrueLabels = y)
+get_rates(res)
+
+# Test
+print("Test")
+data = test_sub
+x = data[ , -which(names(data) %in% c("Revenue"))]
+y = data$Revenue
+glm.probs <- predict(glm.fit, newdata=x, type="response")
+glm.pred <- ifelse(glm.probs > 0.5, 1, 0)
+res = table(Predictions = glm.pred, TrueLabels = y)
+get_rates(res)
+
+summary(glm.fit)
+print(latex(glm.fit))
+```
